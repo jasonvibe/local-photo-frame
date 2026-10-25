@@ -1,0 +1,32 @@
+# Personal photos, derived files, recycled photos and device settings
+/images/
+/thumbnails/
+/recycle/
+settings.txt
+settings.txt.pending
+display-backlight-state.json
+.env
+.env.*
+*.log
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.heic
+*.heif
+*.mp4
+*.mov
+*.zip
+*.bak
+*before-*
+*experimental*
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store

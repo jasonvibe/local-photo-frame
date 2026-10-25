@@ -1,0 +1,42 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="google" content="notranslate"><meta name="viewport" content="width=device-width,initial-scale=1"><title>家庭相册</title><style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#10151a;cursor:none}#frame{display:flex;width:100%;height:100%;gap:0}.tile{position:relative;min-width:0;height:100%;overflow:hidden}.bg{position:absolute;inset:-24px;background-size:cover;background-position:center;filter:blur(20px);opacity:.45}.photo{position:absolute;width:100%;height:100%;inset:0;object-fit:cover;image-orientation:from-image}
+</style><style>.photo{object-position:center 35%}.bg{display:none}</style></head><body><main id="frame"></main><script>
+const meta=new Map(),retryAfter=new Map();let slides=[],index=0,key='',seconds=15,rotation=0,timer,refreshTimer,currentNames=new Set(),refreshTask=null,advancing=false;
+function plan(items,aspect){const out=[],portraits=items.filter(x=>x.r<.95);for(const x of items.filter(x=>x.r>=.95))out.push([x]);while(portraits.length){let count=Math.min(2,portraits.length);if(portraits.length>=3){const sum2=portraits[0].r+portraits[1].r;const sum3=sum2+portraits[2].r;if(Math.abs(Math.log(sum3/aspect))<Math.abs(Math.log(sum2/aspect)))count=3;}out.push(portraits.splice(0,count));}return out;}
+function shuffled(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
+function show(){const frame=document.getElementById('frame'),group=slides[index];if(!group){frame.replaceChildren();return;}const fragment=document.createDocumentFragment();for(const item of group){const tile=document.createElement('section');tile.className='tile';tile.style.flex=String(item.r);const url='/image/'+encodeURIComponent(item.name);const photo=new Image();photo.className='photo';photo.onerror=()=>forgetPhoto(item.name);photo.src=url;photo.alt='';tile.append(photo);fragment.append(tile);}frame.replaceChildren(fragment);}
+function rebuild(immediate=false){const current=(slides[index]||[]).filter(x=>currentNames.has(x.name)&&meta.has(x.name));const keep=new Set(current.map(x=>x.name));const rest=Array.from(meta.values()).filter(x=>currentNames.has(x.name)&&!keep.has(x.name));slides=shuffled(plan(shuffled(rest),innerWidth/innerHeight));if(current.length)slides.unshift(current);index=0;if(immediate||!document.getElementById('frame').children.length)show(true);}
+function forgetPhoto(name){if(!meta.has(name))return;meta.delete(name);retryAfter.set(name,Date.now()+30000);rebuild(true);refresh();}
+function restart(){clearInterval(timer);timer=setInterval(async()=>{if(advancing)return;advancing=true;try{await refresh();if(slides.length){if(index+1>=slides.length){regroup();index=0;}else index++;show();}}finally{advancing=false;}},seconds*1000);}
+function refresh(){if(refreshTask)return refreshTask;refreshTask=syncPlaylist().finally(()=>{refreshTask=null;});return refreshTask;}
+async function syncPlaylist(){try{const response=await fetch('/api/playlist',{cache:'no-store',signal:AbortSignal.timeout(5000)});if(!response.ok)return;const items=await response.json();if(!Array.isArray(items)||items.some(x=>typeof x.name!=='string'||!Number.isFinite(x.r)||x.r<=0))return;const names=items.map(x=>x.name),nextKey=JSON.stringify(items.slice().sort((a,b)=>a.name.localeCompare(b.name)));const changed=nextKey!==key;let deleted=false;currentNames=new Set(names);for(const n of meta.keys())if(!currentNames.has(n)){meta.delete(n);deleted=true;}for(const n of retryAfter.keys())if(!currentNames.has(n))retryAfter.delete(n);let added=false;for(const item of items){if((retryAfter.get(item.name)||0)>Date.now())continue;if(!meta.has(item.name)){added=true;retryAfter.delete(item.name);}meta.set(item.name,item);}key=nextKey;if(changed||added)rebuild(deleted||!items.length);}catch(e){console.error(e);}}
+async function settings(){try{const r=await fetch('/settings',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const next=Math.max(3,Number(s.nextImage)||15);if(next!==seconds){seconds=next;restart();}}catch(e){console.error(e);}}
+window.addEventListener('resize',()=>rebuild(true));
+window.addEventListener('online',refresh);
+window.addEventListener('pageshow',refresh);
+restart();settings();refresh();refreshTimer=setInterval(refresh,2000);setInterval(settings,30000);
+
+// Random transitions v1
+const renderStill=show;let lastEffect=-1,fxGeneration=0,activeFx=[];
+show=function(immediate=false){
+const frame=document.getElementById('frame');const generation=++fxGeneration;
+activeFx.forEach(a=>a.cancel());activeFx=[];document.getElementById('outgoing')?.remove();
+const previous=!immediate&&frame.children.length?frame.cloneNode(true):null;
+if(previous){previous.id='outgoing';previous.style.cssText='position:fixed;inset:0;display:flex;gap:0;z-index:2;pointer-events:none;background:#10151a';document.body.append(previous);}
+renderStill();if(!previous)return;
+const ready=Array.from(frame.querySelectorAll('.photo')).map(im=>im.decode().catch(()=>{}));
+Promise.all(ready).then(()=>{if(generation!==fxGeneration){previous.remove();return;}
+let effect=Math.floor(Math.random()*3);if(effect>=lastEffect)effect++;lastEffect=effect;
+const direction=Math.random()<.5?-1:1;let incoming=[{opacity:0},{opacity:1}],outgoing=[{opacity:1},{opacity:0}];
+if(effect===1){incoming=[{transform:'translateX('+(direction*8)+'%)',opacity:0},{transform:'translateX(0)',opacity:1}];outgoing=[{transform:'translateX(0)',opacity:1},{transform:'translateX('+(-direction*8)+'%)',opacity:0}];}
+if(effect===2){incoming=[{transform:'translateY('+(direction*8)+'%)',opacity:0},{transform:'translateY(0)',opacity:1}];outgoing=[{transform:'translateY(0)',opacity:1},{transform:'translateY('+(-direction*8)+'%)',opacity:0}];}
+if(effect===3){incoming=[{transform:'scale(.96)',opacity:0},{transform:'scale(1)',opacity:1}];outgoing=[{transform:'scale(1)',opacity:1},{transform:'scale(1.04)',opacity:0}];}
+const options={duration:900,easing:'cubic-bezier(.22,.61,.36,1)'};
+activeFx=[frame.animate(incoming,options),previous.animate(outgoing,options)];
+Promise.allSettled(activeFx.map(a=>a.finished)).then(()=>previous.remove());
+});};
+
+// Regroup portraits at every round boundary
+function groupPairs(groups){const pairs=new Set();for(const group of groups)for(let a=0;a<group.length;a++)for(let b=a+1;b<group.length;b++)pairs.add(JSON.stringify([group[a].name,group[b].name].sort()));return pairs;}
+function regroup(){const previous=groupPairs(slides),items=Array.from(meta.values());let best=slides,bestScore=Infinity;const last=JSON.stringify((slides[slides.length-1]||[]).map(x=>x.name).sort());for(let attempt=0;attempt<40;attempt++){const candidate=shuffled(plan(shuffled(items.slice()),innerWidth/innerHeight));const pairs=groupPairs(candidate);let score=0;for(const pair of pairs)if(previous.has(pair))score++;if(candidate.length>1&&JSON.stringify(candidate[0].map(x=>x.name).sort())===last)score++;if(score<bestScore){best=candidate;bestScore=score;}if(score===0)break;}slides=best;}
+</script></body></html>
