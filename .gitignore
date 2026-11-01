@@ -30,3 +30,6 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
+# Deployment build artifacts
+deploy/*.zip
+deploy/surface-paste-bootstrap.ps1
