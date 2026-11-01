@@ -11,7 +11,7 @@ def main():
     args = parser.parse_args()
     print(f'Photo frame: http://localhost:{args.port}/', flush=True)
     print(f'Management: http://localhost:{args.port}/upload', flush=True)
-    serve(app, host=args.host, port=args.port, threads=2)
+    serve(app, host=args.host, port=args.port, threads=8)
 
 
 if __name__ == '__main__':

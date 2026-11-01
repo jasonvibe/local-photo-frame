@@ -28,7 +28,7 @@ const previous=!immediate&&frame.children.length?frame.cloneNode(true):null;
 if(previous){previous.id='outgoing';previous.style.cssText='position:fixed;inset:0;display:flex;gap:0;z-index:2;pointer-events:none;background:#10151a';document.body.append(previous);
 if(previous.querySelectorAll){const times=Array.from(frame.querySelectorAll('video')).map(v=>v.currentTime);previous.querySelectorAll('video').forEach((video,i)=>{video.autoplay=false;video.pause();const seek=()=>{try{video.currentTime=times[i]||0;}catch(error){}};video.readyState>=1?seek():video.addEventListener('loadedmetadata',seek,{once:true});});}}
 renderStill();if(!previous)return;
-const ready=Array.from(frame.querySelectorAll('.photo')).map(el=>el.tagName==='VIDEO'?new Promise(resolve=>{if(el.readyState>=2)return resolve();const limit=setTimeout(resolve,2500);el.addEventListener('loadeddata',()=>{clearTimeout(limit);resolve();},{once:true});el.addEventListener('error',()=>{clearTimeout(limit);resolve();},{once:true});}):el.decode().catch(()=>{}));
+const ready=Array.from(frame.querySelectorAll('.photo')).map(el=>el.tagName==='VIDEO'?new Promise(resolve=>{if(el.readyState>=3)return resolve();const limit=setTimeout(resolve,10000);el.addEventListener('canplay',()=>{clearTimeout(limit);resolve();},{once:true});el.addEventListener('error',()=>{clearTimeout(limit);resolve();},{once:true});}):el.decode().catch(()=>{}));
 Promise.all(ready).then(()=>{if(generation!==fxGeneration){previous.remove();return;}
 let effect=Math.floor(Math.random()*3);if(effect>=lastEffect)effect++;lastEffect=effect;
 const direction=Math.random()<.5?-1:1;let incoming=[{opacity:0},{opacity:1}],outgoing=[{opacity:1},{opacity:0}];
