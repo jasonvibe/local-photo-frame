@@ -1,7 +1,6 @@
 import hashlib
 from functools import lru_cache
 import os
-import struct
 import threading
 import time
 from pathlib import Path
@@ -17,201 +16,13 @@ IMAGE_DIRECTORY = str(BASE / 'images')
 SETTINGS_FILE = str(BASE / 'settings.txt')
 RECYCLE = BASE / 'recycle'
 THUMBNAILS = BASE / 'thumbnails'
-IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
-VIDEO_EXTENSIONS = {'mp4', 'webm', 'mov'}
-ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
-IMAGE_MAX_BYTES = 50 * 1024 * 1024
-VIDEO_MAX_BYTES = 500 * 1024 * 1024
-EBML_SIGNATURE = b'\x1a\x45\xdf\xa3'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 thumb_lock = threading.Lock()
 for directory in (Path(IMAGE_DIRECTORY), RECYCLE, THUMBNAILS):
     directory.mkdir(exist_ok=True)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def is_video(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in VIDEO_EXTENSIONS
-
-def _read_ebml_vint(handle, position, end, keep_marker):
-    """Read an EBML variable-size integer; returns (value, next_position)."""
-    if position >= end:
-        return None, None
-    handle.seek(position)
-    chunk = handle.read(8)
-    if len(chunk) < 1 or chunk[0] == 0:
-        return None, None
-    length = 9 - chunk[0].bit_length()  # leading zero bits encode the total length
-    if position + length > end or len(chunk) < length:
-        return None, None
-    raw = int.from_bytes(chunk[:length], 'big')
-    if keep_marker:
-        return raw, position + length
-    if length == 8 and raw == (1 << 56) - 1:
-        return None, position + length  # unknown size marker
-    return raw & ((1 << (7 * length)) - 1), position + length
-
-def _scan_mp4_boxes(handle, start, end, depth):
-    position, best = start, None
-    while position + 8 <= end:
-        handle.seek(position)
-        header = handle.read(16)
-        if len(header) < 8:
-            return best
-        box_size, box_type = struct.unpack('>I4s', header[:8])
-        content = position + 8
-        if box_size == 1:
-            if len(header) < 16:
-                return best
-            box_size = struct.unpack('>Q', header[8:16])[0]
-            content = position + 16
-        elif box_size == 0:
-            box_size = end - position
-        if box_size < content - position or position + box_size > end:
-            return best
-        if box_type in (b'moov', b'trak') and depth < 2:
-            found = _scan_mp4_boxes(handle, content, position + box_size, depth + 1)
-        elif box_type == b'tkhd':
-            found = _parse_tkhd(handle, content, position + box_size)
-        else:
-            found = None
-        if found and (best is None or found[0] * found[1] > best[0] * best[1]):
-            best = found
-        position += box_size
-    return best
-
-def _parse_tkhd(handle, start, end):
-    """tkhd carries display size as 16.16 fixed point plus a rotation matrix."""
-    handle.seek(start)
-    data = handle.read(96)
-    if len(data) < 84:
-        return None
-    if data[0] == 1:
-        if len(data) < 96:
-            return None
-        raw_width, raw_height = struct.unpack_from('>II', data, 88)
-        matrix = struct.unpack_from('>9i', data, 52)
-    else:
-        raw_width, raw_height = struct.unpack_from('>II', data, 76)
-        matrix = struct.unpack_from('>9i', data, 40)
-    width, height = raw_width / 65536, raw_height / 65536
-    if width <= 0 or height <= 0:
-        return None
-    if abs(matrix[1]) > abs(matrix[0]):  # 90/270 degree rotation swaps axes
-        width, height = height, width
-    return (round(width), round(height))
-
-def _mp4_video_dimensions(path):
-    try:
-        file_size = path.stat().st_size
-        with open(path, 'rb') as handle:
-            return _scan_mp4_boxes(handle, 0, file_size, 0)
-    except OSError:
-        return None
-
-def _scan_webm_tracks(handle, start, end):
-    position = start
-    while position < end:
-        element_id, position = _read_ebml_vint(handle, position, end, True)
-        if element_id is None:
-            return None
-        size, position = _read_ebml_vint(handle, position, end, False)
-        if element_id != 0x1654AE6B:  # Tracks
-            if size is None:
-                return None
-            position += size
-            continue
-        child_end = end if size is None else min(position + size, end)
-        entry = _read_webm_track_entries(handle, position, child_end)
-        if entry:
-            return entry
-        if size is None:
-            return None
-        position += size
-    return None
-
-def _read_webm_track_entries(handle, start, end):
-    position = start
-    while position < end:
-        element_id, position = _read_ebml_vint(handle, position, end, True)
-        if element_id is None:
-            return None
-        size, position = _read_ebml_vint(handle, position, end, False)
-        if size is None:
-            return None
-        payload_end = min(position + size, end)
-        if element_id == 0xAE:  # TrackEntry
-            entry = _read_webm_track_entry(handle, position, payload_end)
-            if entry:
-                return entry
-        position = payload_end
-    return None
-
-def _read_webm_track_entry(handle, start, end):
-    position, width, height, is_video_track = start, 0, 0, False
-    while position < end:
-        element_id, position = _read_ebml_vint(handle, position, end, True)
-        if element_id is None:
-            break
-        size, position = _read_ebml_vint(handle, position, end, False)
-        if size is None:
-            break
-        payload_end = min(position + size, end)
-        if element_id == 0x83 and size <= 8:  # TrackType: 1 = video
-            handle.seek(position)
-            is_video_track = int.from_bytes(handle.read(size), 'big') == 1
-        elif element_id == 0xE0:  # Video
-            dimensions = _read_webm_video_element(handle, position, payload_end)
-            if dimensions:
-                width, height = dimensions
-        position = payload_end
-    return (width, height) if is_video_track and width > 0 and height > 0 else None
-
-def _read_webm_video_element(handle, start, end):
-    position, width, height = start, 0, 0
-    while position < end:
-        element_id, position = _read_ebml_vint(handle, position, end, True)
-        if element_id is None:
-            break
-        size, position = _read_ebml_vint(handle, position, end, False)
-        if size is None:
-            break
-        payload_end = min(position + size, end)
-        if element_id == 0xB0 and size <= 8:  # PixelWidth
-            handle.seek(position)
-            width = int.from_bytes(handle.read(size), 'big')
-        elif element_id == 0xBA and size <= 8:  # PixelHeight
-            handle.seek(position)
-            height = int.from_bytes(handle.read(size), 'big')
-        position = payload_end
-    return (width, height) if width > 0 and height > 0 else None
-
-def _webm_video_dimensions(path):
-    try:
-        file_size = path.stat().st_size
-        with open(path, 'rb') as handle:
-            element_id, position = _read_ebml_vint(handle, 0, file_size, True)
-            if element_id != 0x1A45DFA3:  # EBML header
-                return None
-            size, position = _read_ebml_vint(handle, position, file_size, False)
-            if size is not None:
-                position += size
-            segment_id, position = _read_ebml_vint(handle, position, file_size, True)
-            if segment_id != 0x18538067:  # Segment
-                return None
-            size, position = _read_ebml_vint(handle, position, file_size, False)
-            segment_end = file_size if size is None else min(position + size, file_size)
-            # Track headers live near the start; scanning a bounded window avoids
-            # walking a potentially huge file.
-            return _scan_webm_tracks(handle, position, min(segment_end, position + 32 * 1024 * 1024))
-    except OSError:
-        return None
-
-@lru_cache(maxsize=2048)
-def video_dimensions(path, modified_ns, size):
-    path = Path(path)
-    dimensions = _webm_video_dimensions(path) if path.suffix.lower() == '.webm' else _mp4_video_dimensions(path)
-    return dimensions if dimensions else (16, 9)
 
 def read_settings():
     settings = dict(nextImage=15, refreshImages=10, imageWidth=1920, imageHeight=1280, rotateImages=0)
@@ -268,7 +79,7 @@ def get_image(filename):
 @app.route('/thumbnail/<filename>')
 def thumbnail(filename):
     source = valid_path(filename)
-    if source is None or is_video(filename):
+    if source is None:
         abort(404)
     stat = source.stat()
     digest = hashlib.sha256(f'{filename}:{stat.st_mtime_ns}:{stat.st_size}'.encode()).hexdigest()
@@ -299,7 +110,7 @@ def upload_image():
         for file in request.files.getlist('file'):
             name = file.filename or ''
             if not allowed_file(name):
-                errors.append({'name': name, 'message': '格式暂不支持，请选择 JPG、PNG、GIF 或 MP4、WebM、MOV 文件'})
+                errors.append({'name': name, 'message': '格式暂不支持，请选择 JPG、PNG 或 GIF 照片'})
                 continue
             safe = secure_filename(name)
             extension = name.rsplit('.', 1)[1].lower()
@@ -308,25 +119,17 @@ def upload_image():
             temporary = Path(IMAGE_DIRECTORY) / (unique + '.pending')
             try:
                 file.save(temporary)
-                if is_video(name):
-                    if temporary.stat().st_size > VIDEO_MAX_BYTES:
-                        raise ValueError('视频请小于 500 MB')
-                    with open(temporary, 'rb') as check:
-                        magic = check.read(12)
-                    if magic[4:8] != b'ftyp' and not magic.startswith(EBML_SIGNATURE):
-                        raise ValueError('视频容器无法识别，请上传标准 MP4 / WebM / MOV 文件')
-                else:
-                    if temporary.stat().st_size > IMAGE_MAX_BYTES:
-                        raise ValueError('单张照片请小于 50 MB')
-                    with Image.open(temporary) as check:
-                        check.verify()
-                    if request.form.get('original') != '1':
-                        with Image.open(temporary) as source:
-                            image = ImageOps.exif_transpose(source)
-                            image.thumbnail((settings['imageWidth'], settings['imageHeight']), Image.Resampling.LANCZOS)
-                            if extension in ('jpg', 'jpeg'):
-                                image = image.convert('RGB')
-                            image.save(temporary, format={'jpg': 'JPEG', 'jpeg': 'JPEG', 'png': 'PNG', 'gif': 'GIF'}[extension])
+                if temporary.stat().st_size > 50 * 1024 * 1024:
+                    raise ValueError('单张照片请小于 50 MB')
+                with Image.open(temporary) as check:
+                    check.verify()
+                if request.form.get('original') != '1':
+                    with Image.open(temporary) as source:
+                        image = ImageOps.exif_transpose(source)
+                        image.thumbnail((settings['imageWidth'], settings['imageHeight']), Image.Resampling.LANCZOS)
+                        if extension in ('jpg', 'jpeg'):
+                            image = image.convert('RGB')
+                        image.save(temporary, format={'jpg': 'JPEG', 'jpeg': 'JPEG', 'png': 'PNG', 'gif': 'GIF'}[extension])
                 os.replace(temporary, Path(IMAGE_DIRECTORY) / unique)
                 uploaded.append(unique)
             except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as error:
@@ -382,10 +185,7 @@ def photo_list():
     for name in image_names():
         try:
             info = (Path(IMAGE_DIRECTORY) / name).stat()
-            entry = dict(name=name, modified=info.st_mtime_ns // 1000000, size=info.st_size)
-            if is_video(name):
-                entry['v'] = 1
-            photos.append(entry)
+            photos.append(dict(name=name, modified=info.st_mtime_ns // 1000000, size=info.st_size))
         except FileNotFoundError:
             pass
     return jsonify(sorted(photos, key=lambda p: (p['modified'], p['name']), reverse=True))
@@ -409,10 +209,6 @@ def playback_playlist():
         path = Path(IMAGE_DIRECTORY) / name
         try:
             info = path.stat()
-            if is_video(name):
-                width, height = video_dimensions(str(path), info.st_mtime_ns, info.st_size)
-                items.append(dict(name=name, r=width / height, v=1))
-                continue
             ratio = image_ratio(str(path), info.st_mtime_ns, info.st_size)
         except FileNotFoundError:
             continue
